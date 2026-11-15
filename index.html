@@ -59,8 +59,17 @@ let cfg;try{const r=await fetch('/api/config',{cache:'no-store'});if(!r.ok)throw
 if(!window.supabase){say('Não foi possível carregar a autenticação. Verifica a ligação à Internet.');return}
 const sb=window.supabase.createClient(cfg.url,cfg.key);window.voarSupabase=sb;
 const getToken=async()=>{const {data}=await sb.auth.getSession();return data.session?.access_token};
-async function api(path,opts={}){const token=await getToken();if(!token)throw Error('Inicia sessão primeiro.');const r=await fetch(path,{...opts,headers:{...opts.headers,Authorization:'Bearer '+token},cache:'no-store'});const j=await r.json();if(!r.ok)throw Error(j.error||'Pedido não concluído');return j}
-async function check(){say('A verificar o teu acesso...');try{const {data:{user}}=await sb.auth.getUser();if(!user){$a('authControls').hidden=false;$a('purchaseControls').hidden=true;say('');return} $a('authControls').hidden=true;$a('purchaseControls').hidden=false;$a('voarAccount').textContent='Conta: '+user.email;
+async function api(path,opts={}){const token=await getToken();if(!token)throw Error('Inicia sessão primeiro.');const r=await fetch(path,{...opts,headers:{...opts.headers,Authorization:'Bearer '+token},cache:'no-store'});const j=await r.json();if(!r.ok){const err=Error(j.error||'Pedido não concluído');err.status=r.status;err.code=j.code;throw err}return j}
+let lastSessionWarning=false;
+ async function sessionReplaced(){
+  if(lastSessionWarning)return;
+  lastSessionWarning=true;window.voarAuthorized=false;DATA=[];window.DATA=[];
+  document.body.classList.remove('voar-authorized');
+  $a('authControls').hidden=false;$a('purchaseControls').hidden=true;
+  say('A tua conta foi iniciada noutro dispositivo. Para voltares a utilizar esta aplicação, inicia sessão novamente.');
+  await sb.auth.signOut({scope:'local'}).catch(()=>{});
+ }
+ async function check(){say('A verificar o teu acesso...');try{const {data:{user}}=await sb.auth.getUser();if(!user){$a('authControls').hidden=false;$a('purchaseControls').hidden=true;say('');return} $a('authControls').hidden=true;$a('purchaseControls').hidden=false;$a('voarAccount').textContent='Conta: '+user.email;
 const access=await api('/api/access');if(!access.active){say('A tua conta ainda não tem acesso ativo.');return}
 const result=await api('/api/content');if(!Array.isArray(result.days)||result.days.length<30)throw Error('Conteúdos indisponíveis');
 window.DATA=result.days; // a variável lexical DATA é definida no script principal
@@ -71,7 +80,7 @@ if('serviceWorker' in navigator){const regs=await navigator.serviceWorker.getReg
 const a=document.querySelector('audio[data-private-audio]');if(a){try{const signed=await api('/api/audio?file=dia-18.mp3');a.src=signed.url}catch(e){console.warn('Áudio privado indisponível')}}
 render();say('');
 }catch(e){say(e.message)}}
-$a('voarLogin').onclick=async()=>{say('A entrar...');const {error}=await sb.auth.signInWithPassword({email:$a('voarEmail').value.trim(),password:$a('voarPassword').value});if(error)say(error.message);else await check()};
+$a('voarLogin').onclick=async()=>{say('A entrar...');const {error}=await sb.auth.signInWithPassword({email:$a('voarEmail').value.trim(),password:$a('voarPassword').value});if(error)say(error.message);else {try{await api('/api/session-login',{method:'POST'});lastSessionWarning=false;await check()}catch(e){say('Não foi possível ativar a sessão: '+e.message)}}};
 let signupMode=false;
 $a('voarSignup').onclick=async()=>{
   if(!signupMode){
@@ -98,7 +107,12 @@ $a('voarSignup').onclick=async()=>{
   finally{$a('voarSignup').disabled=false;}
 };
 $a('voarBuy').onclick=async()=>{say('A preparar o pagamento...');try{const j=await api('/api/checkout',{method:'POST'});location.assign(j.url)}catch(e){say(e.message)}};
-$a('voarRefresh').onclick=check;$a('voarLogout').onclick=async()=>{await sb.auth.signOut();location.reload()};
+$a('voarRefresh').onclick=check;
+ async function verifyActiveSession(){if(!window.voarAuthorized)return;try{await api('/api/access')}catch(e){if(e.code==='SESSION_REPLACED'||e.code==='SESSION_NOT_REGISTERED'||e.status===401)await sessionReplaced()}}
+ setInterval(verifyActiveSession,60000);
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)verifyActiveSession()});
+ window.addEventListener('focus',verifyActiveSession);
+ $a('voarLogout').onclick=async()=>{await sb.auth.signOut();location.reload()};
 await check();
 })();
 </script></body></html>
