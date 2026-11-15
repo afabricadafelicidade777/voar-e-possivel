@@ -1,0 +1,1 @@
+import {requireUser,hasAccess,fail} from './_shared.js';export default async function handler(req,res){try{const u=await requireUser(req);res.status(200).json({active:await hasAccess(u.id)})}catch(e){fail(res,e)}}
