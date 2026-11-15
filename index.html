@@ -67,27 +67,95 @@ const $a=id=>document.getElementById(id);const say=t=>$a('authMessage').textCont
 let cfg;try{const r=await fetch('/api/config',{cache:'no-store'});if(!r.ok)throw Error('Configuração indisponível');cfg=await r.json()}catch(e){say('Não foi possível iniciar a aplicação. Tenta novamente mais tarde.');return}
 if(!window.supabase){say('Não foi possível carregar a autenticação. Verifica a ligação à Internet.');return}
 const sb=window.supabase.createClient(cfg.url,cfg.key);window.voarSupabase=sb;
- // A sincronização só começa após a migração inicial de cada navegador.
- const syncStatus=msg=>{const el=$a('syncStatus');if(el)el.textContent=msg};
- const clone=x=>JSON.parse(JSON.stringify(x||{}));
- const canonical=x=>JSON.stringify(x||{});
- const hasWork=x=>x&&typeof x==='object'&&(!!x.done||!!String(x.reflection||'').trim()||!!String(x.insight||'').trim()||Object.values(x.answers||{}).some(v=>String(v??'').trim())||!!x.photo||Object.keys(x.drawings||{}).length>0||(x.beliefPairs||[]).some(p=>p.limit?.trim()||p.opposite?.trim()));
- let syncUser=null,syncReady=false,syncBusy=false,syncTimer=null,syncDirty=new Set(),cloudSnapshot={},pendingConflicts=[];
+ // Sincronização automática por conta. Conserva versões alternativas de campos divergentes.
+ const syncStatus=msg=>{const el=document.getElementById('syncStatus');if(el)el.textContent=msg};
+ const clone=x=>JSON.parse(JSON.stringify(x??{}));
+ const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+ const filled=v=>v!==null&&v!==undefined&&v!==''&&v!==false&&!(Array.isArray(v)&&!v.length)&&!(typeof v==='object'&&!Array.isArray(v)&&!Object.keys(v).length);
+ let syncUser=null,syncReady=false,syncBusy=false,syncTimer=null,syncDirty=new Set(),cloudSnapshot={};
  const downloadJSON=(obj,name)=>{const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000)};
  function backupLocal(){downloadJSON({format:'VOAR-local-backup-v1',user_id:syncUser,exported_at:new Date().toISOString(),days:clone(state)},'VOAR_copia_dispositivo_'+new Date().toISOString().slice(0,10)+'.json')}
  function backupCloud(){downloadJSON({format:'VOAR-cloud-backup-v1',user_id:syncUser,exported_at:new Date().toISOString(),days:clone(cloudSnapshot)},'VOAR_copia_conta_'+new Date().toISOString().slice(0,10)+'.json')}
- $a('backupProgress').onclick=backupLocal;$a('backupLocal').onclick=backupLocal;$a('backupCloud').onclick=backupCloud;
- $a('migrationLater').onclick=()=>{$a('migrationOverlay').classList.add('hidden');syncStatus('Sincronização pendente: escolhe como resolver as diferenças. As respostas continuam guardadas neste dispositivo.');};
- $a('syncNow').onclick=async()=>{if(!syncUser)return;await beginSync(true)};
- async function readCloud(){const {data,error}=await sb.from('progresso_voar').select('dia,dados').eq('user_id',syncUser).order('dia');if(error)throw error;const result={};for(const r of data||[])result[r.dia]=r.dados||{};return result}
- async function writeDay(n,data){const {error}=await sb.from('progresso_voar').upsert({user_id:syncUser,dia:Number(n),dados:clone(data),atualizado_em:new Date().toISOString()},{onConflict:'user_id,dia'});if(error)throw error;cloudSnapshot[n]=clone(data)}
- function showConflicts(conflicts){pendingConflicts=conflicts;$a('migrationChoices').innerHTML='';for(const n of conflicts){const label=document.createElement('label');label.className='sync-choice';const title=DATA.find(x=>x.n===n)?.title||'Desafio';const strong=document.createElement('strong');strong.textContent='Dia '+String(n).padStart(2,'0')+' — '+title;const select=document.createElement('select');select.dataset.day=n;const a=document.createElement('option');a.value='';a.textContent='Escolher versão…';const b=document.createElement('option');b.value='local';b.textContent='Manter respostas deste dispositivo';const c=document.createElement('option');c.value='cloud';c.textContent='Manter respostas guardadas na conta';select.append(a,b,c);label.append(strong,select);$a('migrationChoices').append(label)}$a('migrationMessage').textContent='Escolhe uma versão para cada dia. Descarrega primeiro as duas cópias de segurança.';$a('migrationOverlay').classList.remove('hidden');syncStatus('Há '+conflicts.length+' dia(s) com respostas diferentes por resolver.');}
- $a('migrationApply').onclick=async()=>{const choices=[...$a('migrationChoices').querySelectorAll('select')];if(choices.some(x=>!x.value)){$a('migrationMessage').textContent='Escolhe uma versão para todos os dias antes de continuar.';return} $a('migrationApply').disabled=true;try{for(const choice of choices){const n=Number(choice.dataset.day);if(choice.value==='cloud'){state[n]=clone(cloudSnapshot[n]);}else{await writeDay(n,state[n]);}}localStorage.setItem(KEY,JSON.stringify(state));$a('migrationOverlay').classList.add('hidden');pendingConflicts=[];syncReady=true;render();syncStatus('Progresso sincronizado com a tua conta ✓');await flushSync();}catch(e){$a('migrationMessage').textContent='Erro ao sincronizar: '+e.message+' — mantém os dados deste navegador.';syncStatus('Sincronização incompleta. Tenta novamente.')}finally{$a('migrationApply').disabled=false}};
- async function beginSync(manual=false){if(!syncUser||syncBusy)return;if(!navigator.onLine){syncStatus('Sem Internet. As respostas continuam guardadas neste dispositivo.');return}syncBusy=true;syncReady=false;syncStatus('A comparar os dados do dispositivo com a conta…');try{const remote=await readCloud();cloudSnapshot=clone(remote);const conflicts=[];const upload=[];for(let n=1;n<=30;n++){const l=state[n],r=remote[n];if(hasWork(l)&&hasWork(r)&&canonical(l)!==canonical(r))conflicts.push(n);else if(hasWork(l)&&!hasWork(r))upload.push(n);else if(!hasWork(l)&&hasWork(r))state[n]=clone(r)}if(remote[31]||state[31]){const l=state[31],r=remote[31];if(hasWork(l)&&hasWork(r)&&canonical(l)!==canonical(r))conflicts.push(31);else if(hasWork(l)&&!hasWork(r))upload.push(31);else if(!hasWork(l)&&hasWork(r))state[31]=clone(r)}localStorage.setItem(KEY,JSON.stringify(state));render();for(const n of upload)await writeDay(n,state[n]);if(conflicts.length){showConflicts(conflicts);return}syncReady=true;syncStatus('Progresso sincronizado com a tua conta ✓');await flushSync();}catch(e){syncStatus('Não foi possível sincronizar: '+e.message+'. Os dados continuam neste dispositivo.')}finally{syncBusy=false}}
- async function flushSync(){if(!syncReady||!syncUser||syncBusy||!navigator.onLine)return;syncBusy=true;try{while(syncDirty.size){const batch=[...syncDirty];syncDirty.clear();for(const n of batch){if(!hasWork(state[n])&&!cloudSnapshot[n])continue;try{await writeDay(n,state[n])}catch(e){syncDirty.add(n);throw e}}}syncStatus('Progresso sincronizado com a tua conta ✓')}catch(e){syncStatus('Alterações guardadas neste dispositivo; sincronização pendente.');}finally{syncBusy=false}}
- window.voarQueueSync=n=>{if(!syncUser)return;syncDirty.add(n);syncStatus('A guardar alterações…');clearTimeout(syncTimer);syncTimer=setTimeout(flushSync,1100)};
+ document.getElementById('backupProgress').onclick=backupLocal;
+ document.getElementById('backupLocal').onclick=backupLocal;
+ document.getElementById('backupCloud').onclick=backupCloud;
+ document.getElementById('migrationOverlay').classList.add('hidden');
+ document.getElementById('syncNow').onclick=()=>beginSync();
+ // O histórico guarda alternativas sem substituir silenciosamente informação anterior.
+ // Para dados antigos sem data por campo, a versão da conta tem prioridade quando ambas estão preenchidas.
+ const isPlain=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
+ function mergeDay(local,remote){
+  if(!isPlain(local))return clone(remote);
+  if(!isPlain(remote))return clone(local);
+  const result=clone(remote);
+  const versions=Array.isArray(result._sync_versions)?result._sync_versions:[];
+  const seen=new Set(versions.map(x=>JSON.stringify(x)));
+  const addVersion=(path,value)=>{const v={campo:path,valor:clone(value),guardado_em:new Date().toISOString()};
+   const signature=JSON.stringify({campo:path,valor:value});
+   if(!versions.some(x=>JSON.stringify({campo:x.campo,valor:x.valor})===signature)){versions.push(v);}
+  };
+  function mergeInto(target,source,path){for(const [key,value] of Object.entries(source)){
+   if(key==='_sync_versions')continue;
+   const here=path?path+'.'+key:key;
+   if(!(key in target)||!filled(target[key])){if(filled(value)||!(key in target))target[key]=clone(value);continue}
+   if(!filled(value)||same(target[key],value))continue;
+   if(isPlain(value)&&isPlain(target[key])){mergeInto(target[key],value,here);continue}
+   if(key==='done'&&typeof value==='boolean'){target[key]=Boolean(target[key]||value);continue}
+   // Para respostas antigas diferentes, mantém-se a versão da conta e arquiva-se a do dispositivo.
+   addVersion(here,value);
+  }}
+  mergeInto(result,local,'');
+  if(Array.isArray(local._sync_versions))for(const v of local._sync_versions){
+   const signature=JSON.stringify({campo:v.campo,valor:v.valor});
+   if(!versions.some(x=>JSON.stringify({campo:x.campo,valor:x.valor})===signature))versions.push(v);
+  }
+  if(versions.length)result._sync_versions=versions;
+  return result;
+ }
+ async function readCloud(){const {data,error}=await sb.from('progresso_voar').select('dia,dados').eq('user_id',syncUser).order('dia');if(error)throw error;const out={};for(const row of data||[])out[row.dia]=row.dados||{};return out}
+ async function writeDay(n,value){const {error}=await sb.from('progresso_voar').upsert({user_id:syncUser,dia:Number(n),dados:clone(value),atualizado_em:new Date().toISOString()},{onConflict:'user_id,dia'});if(error)throw error;cloudSnapshot[n]=clone(value)}
+ const persist=()=>localStorage.setItem(KEY,JSON.stringify(state));
+ async function beginSync(){
+  if(!syncUser||syncBusy||!navigator.onLine)return;
+  syncBusy=true;syncReady=false;syncStatus('A sincronizar automaticamente…');
+  try{
+   const remote=await readCloud();cloudSnapshot=clone(remote);
+   const changes=[];
+   for(let n=1;n<=30;n++){
+    const merged=mergeDay(state[n],remote[n]);
+    if(!same(merged,remote[n])&&Object.keys(merged).length)changes.push([n,merged]);
+    if(Object.keys(merged).length)state[n]=merged;
+   }
+   persist();render();
+   for(const [n,value] of changes)await writeDay(n,value);
+   syncDirty.clear();syncReady=true;syncStatus('Progresso sincronizado com a tua conta ✓');
+  }catch(e){syncStatus('Sem sincronização neste momento. Respostas guardadas no dispositivo.');console.warn('VOAR sync',e)}
+  finally{syncBusy=false}
+ }
+ async function flushSync(){
+  if(!syncUser||syncBusy||!navigator.onLine||!syncReady)return;
+  syncBusy=true;
+  try{
+   const remote=await readCloud();cloudSnapshot=clone(remote);
+   const dirty=[...syncDirty];
+   for(const n of dirty){
+    // Uma edição recente neste navegador tem prioridade; o valor remoto diferente é arquivado.
+    const latest=clone(state[n]||{}),old=remote[n]||{};
+    const combined=mergeDay(old,latest);
+    if(!same(combined,old))await writeDay(n,combined);
+    state[n]=combined;
+    syncDirty.delete(n);
+   }
+   // Atualizações de outro dispositivo chegam aos dias que não estão a ser editados.
+   for(let n=1;n<=30;n++)if(!dirty.includes(n)&&remote[n])state[n]=mergeDay(state[n],remote[n]);
+   persist();syncStatus('Progresso sincronizado com a tua conta ✓');
+  }catch(e){syncStatus('Alterações guardadas neste dispositivo; sincronização pendente.');console.warn('VOAR sync',e)}
+  finally{syncBusy=false}
+ }
+ window.voarQueueSync=n=>{if(!syncUser)return;syncDirty.add(Number(n));syncStatus('A guardar alterações…');clearTimeout(syncTimer);syncTimer=setTimeout(flushSync,1100)};
  window.addEventListener('online',()=>{if(syncUser){if(syncReady)flushSync();else beginSync()}});
- document.addEventListener('visibilitychange',()=>{if(!document.hidden&&syncUser){if(syncReady)flushSync();else if(!pendingConflicts.length)beginSync()}});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&syncUser){if(syncReady)flushSync();else beginSync()}});
+ setInterval(()=>{if(syncUser&&navigator.onLine){if(syncReady)flushSync();else beginSync()}},30000);
 
  let recoveryMode=false;
  const recoveryLink=location.hash.includes('type=recovery')||new URLSearchParams(location.search).get('type')==='recovery';
